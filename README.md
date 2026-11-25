@@ -18,6 +18,7 @@ It runs inside the Project_Management site at `/geopromax`. Pull the site and it
 | **Creep** | Cα/(1+ep)·h·log(t/t95), once a layer is 95% consolidated; Cα·Cr/Cc where the soil stays overconsolidated (Mesri and Castro 1987). |
 | **Convergence** | Sub-layers are refined automatically until the settlement changes by less than 0.5%, and the Checks tab says so. Inputs that cannot be solved, or that put the answer in doubt, are flagged. |
 | **Limits** | Pick what is being built (framed building on pads or a raft, masonry, steel shed, tall building, tank, silo, bridge, machine, crane, embankment) and the usual limits on settlement and tilt are set; type your own over them. Every foundation is checked on its own and against its neighbours, and the headline says whether the design is within the limits at the design life. |
+| **CSI SAFE link** | Soil and structure solved in turn. Open the Soil Pressures table SAFE exports (the Excel file itself, a CSV, or pasted cells; SAFE 20 and later; any unit system, read from the table's own units row). GeoProMax turns the pressures into the load on the ground, works out the subgrade modulus under every part of the raft (pressure over settlement), bands them into a few soil properties and writes them out for SAFE in the units you choose. Run SAFE again, bring the new pressures in, and the panel shows how far the springs moved each round until they converge. |
 | **Plan and section** | Total settlement over a grid at any time, with contours; a cross-section with the foundations at their depths, the piles, the stress bulbs and the settled ground. Play it through time with the time bar. |
 | **Report** | A printable report (save it as PDF), the results table as CSV, and the project as a JSON file. |
 
@@ -47,6 +48,7 @@ The **Verification** tab runs these checks in the browser, and CI runs the same 
 | Heave under an excavation | Cr·log(σ'f/σ'v0) | within 0.1 mm |
 | Wick drains | Hansbo (1981) with Carrillo's rule | within 0.5% |
 | Automatic refinement | The same layer cut into 400 sub-layers | within 1% |
+| SAFE loop against a rigid raft on springs | Converges in a few rounds to even settlement, with the load kept | within 10% evenness, load exact |
 | Rigid square footing | 0.80 of the flexible centre settlement (Bowles) | within 0.05 |
 
 ## Run it alone

@@ -7,6 +7,8 @@ import { PRESETS, PRESET_GROUPS, LOAD_TYPES, LOAD_NAMES, STRUCTURES, structureOf
 import { solvePoint, settlementAt, timeCurve, timeTo, initialStress, foundationResults, summarize, betweenFoundations, gridSubLayers, prepare } from "../engine/settlement.js";
 import { extents, grossPressure, appliedPressure, foundingDepth, loadForce, loadCentre, equivalentRaft, parsePoints } from "../engine/stress.js";
 import { runChecks } from "../engine/verify.js";
+import { readSafe, toCells, round as safeRound, springs, zonesOf, exportTables, parseDelimited, UNIT_SYSTEMS, unitSystem } from "../engine/ssi.js";
+import { readXlsx } from "../engine/xlsx.js";
 import { drawPlan, sample, rampCSS } from "./plan.js";
 import { timeChart, depthChart, sectionView, soilColour, esc } from "./charts.js";
 
@@ -70,6 +72,7 @@ const ICONS = {
   load: '<path d="M4 4h12M6 4v7M10 4v7M14 4v7M4 11l2 3 2-3M8 11l2 3 2-3M12 11l2 3 2-3M2 16h16" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
   calc: '<path d="M3 16 L8 9 L12 12 L17 4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
   limit: '<path d="M3 5h14M3 15h14M10 5v10M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  link: '<path d="M8 12l4-4M6.5 9.5l-2 2a2.8 2.8 0 004 4l2-2M13.5 10.5l2-2a2.8 2.8 0 00-4-4l-2 2" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>',
   point: '<circle cx="10" cy="9" r="3" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M10 12v6" stroke="currentColor" stroke-width="1.6"/>',
 };
 const icon = (k) => `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true">${ICONS[k] || ""}</svg>`;
@@ -177,6 +180,13 @@ function loadsWidget(p) {
   const cards = p.loads.map((l, i) => {
     const k = `loads.${i}`;
     const isPoly = l.type === "polygon", emb = l.type === "embankment";
+    if (l.type === "field") return `<div class="item ${l.on === false ? "off" : ""}" data-load="${i}">
+      <div class="item-head"><input class="lname" data-k="${k}.name" value="${esc(l.name)}" aria-label="Name">${tools("load", i, p.loads.length, true)}</div>
+      <div class="note">Soil pressures brought in from SAFE: ${esc(describeLoad(l))}. Bring new ones in under CSI SAFE link.</div>
+      <div class="two">${num(`${k}.Df`, "Founded at", "m", { min: 0, step: 0.25, sub: "below ground" })}${num(`${k}.t0`, "Applied at", "yr", { min: 0, step: 0.25, sub: "0 = start" })}</div>
+      ${+l.Df > 0 ? toggle(`${k}.net`, "Take off the soil dug out", "net pressure: only the load beyond the excavated soil's weight settles the ground") : ""}
+      ${toggle(`${k}.on`, "Switched on")}
+    </div>`;
     // with many foundations, each is one line until it is opened
     if (p.loads.length > 4 && state.openLoad !== i) return `<div class="item compact ${l.on === false ? "off" : ""}" data-load="${i}">
       <div class="item-head"><button type="button" class="lopen" data-act="load-open" data-i="${i}" aria-expanded="false"><b>${esc(l.name || `Load ${i + 1}`)}</b><span>${esc(LOAD_NAMES[l.type] || l.type)} at (${fmt(loadCentre(l)[0], 1)}, ${fmt(loadCentre(l)[1], 1)}) · ${esc(describeLoad(l))}</span></button>${tools("load", i, p.loads.length, true)}</div>
@@ -216,6 +226,92 @@ function loadsWidget(p) {
       <button type="button" class="btn btn-ghost btn-sm" data-act="grid-replace">Replace all loads with them</button></div>
     </details>`;
 }
+// ---- the loop with CSI SAFE
+const fieldIndex = () => state.project.loads.findIndex((l) => l.type === "field");
+function safeList() {
+  const i = fieldIndex();
+  if (i < 0) return [];
+  if (!state.safeList) state.safeList = springs(state.project, state.project.loads[i], life());
+  return state.safeList;
+}
+function zoneMap(list, size, zoning) {
+  if (!list.length) return "";
+  const xs = list.map((s) => s.x), ys = list.map((s) => s.y), x1 = Math.min(...xs) - size / 2, y2 = Math.max(...ys) + size / 2;
+  const w = Math.max(...xs) + size / 2 - x1, h = y2 - (Math.min(...ys) - size / 2), n = zoning.zones.length;
+  const col = (z) => `color-mix(in srgb, var(--series-1) ${n > 1 ? Math.round(18 + (72 * z) / (n - 1)) : 60}%, var(--surface))`;
+  return `<svg class="zonemap" viewBox="0 0 ${w} ${h}" role="img" aria-label="Where each soil property goes">${list.map((s, i) => `<rect x="${(s.x - size / 2 - x1).toFixed(3)}" y="${(y2 - s.y - size / 2).toFixed(3)}" width="${size.toFixed(3)}" height="${size.toFixed(3)}" fill="${col(zoning.of[i])}"><title>${zoning.zones[zoning.of[i]]?.name || ""} at (${fmt(s.x, 1)}, ${fmt(s.y, 1)}): ${mm(s.s, 1)} mm</title></rect>`).join("")}</svg>
+    <div class="zonekey">${zoning.zones.map((z, i) => `<span><i style="background:${col(i)}"></i>${z.name}</span>`).join("")}<span class="muted">soft to stiff</span></div>`;
+}
+function safeWidget(p) {
+  const s = p.safe, u = unitSystem(s.units), d = state.safeDraft, K = 1 / u[6];
+  const kf = (k) => fmt(k * K, k * K >= 100 ? 0 : k * K >= 1 ? 2 : 5);
+  const opt = (list, sel) => list.map((c) => `<option value="${esc(c)}" ${c === sel ? "selected" : ""}>${esc(c)}</option>`).join("");
+  const draft = d ? (d.error ? `<div class="warn bad-text">✕ ${esc(d.error)}</div>` : `<div class="ok">✓ ${esc(d.name)}: ${d.info.kind === "pressure" ? "soil pressures" : "vertical reactions"} at ${fmt(d.info.points.length, 0)} points${d.info.table && d.info.table !== "pasted" ? ` from the sheet "${esc(d.info.table)}"` : ""}, units ${esc(d.info.units)}.</div>
+      ${d.info.notes.map((n) => `<div class="note">${esc(n)}</div>`).join("")}
+      ${d.info.cases.length > 1 ? `<div class="f wide"><span class="lab">Load case or combination<small>use the long-term service one</small></span><select data-safe="kase">${opt(d.info.cases, d.info.kase)}</select></div>` : ""}
+      ${d.info.steps.length > 1 ? `<div class="f wide"><span class="lab">Step</span><select data-safe="step">${opt(d.info.steps, d.info.step)}</select></div>` : ""}
+      <button type="button" class="btn btn-primary btn-sm" data-act="safe-run">Bring it in and work out the springs</button>`) : "";
+  const rounds = s.rounds.length ? `<div class="table-scroll"><table class="tight"><thead><tr><th>Round</th><th class="num">Settlement (mm)</th><th class="num">Springs (${u[5]})</th><th class="num">Change</th></tr></thead><tbody>
+      ${s.rounds.map((r, i) => `<tr><td><b>${i + 1}</b><div class="note">${r.kase ? `${esc(r.kase)}, ` : ""}${fmt(r.force / 1000, 1)} MN</div></td><td class="num">${mm(r.sMin)}<div class="note">to ${mm(r.sMax)}</div></td><td class="num">${kf(r.kMin)}<div class="note">to ${kf(r.kMax)}</div></td><td class="num">${r.mean === null ? "first" : `${fmt(r.mean * 100, 1)}%<div class="note">most ${fmt(r.max * 100, 1)}%</div>`}</td></tr>`).join("")}
+      </tbody></table></div>` : "";
+  const last = s.rounds.at(-1), i = fieldIndex();
+  let out = "";
+  if (last && i >= 0) {
+    const list = safeList(), zoning = zonesOf(list, +s.zones || 5);
+    out = `${last.converged ? `<div class="ok">✓ Converged: the springs moved by ${fmt(last.mean * 100, 1)}% on average since the round before, under the ${fmt(+s.tol, 0)}% asked for. SAFE and the ground agree.</div>`
+      : `<div class="warn">▲ ${last.mean === null ? "First round." : `The springs moved by ${fmt(last.mean * 100, 1)}% on average (most ${fmt(last.max * 100, 1)}%).`} Put these springs into SAFE, run it again, and bring the new soil pressures in.</div>`}
+      ${zoneMap(list, +p.loads[i].size, zoning)}
+      <div class="table-scroll"><table class="tight"><thead><tr><th>Soil property</th><th class="num">Subgrade modulus (${u[5]})</th><th class="num">Cells</th></tr></thead><tbody>${zoning.zones.map((z) => `<tr><td>${z.name}</td><td class="num"><b>${kf(z.k)}</b></td><td class="num">${z.n}</td></tr>`).join("")}</tbody></table></div>
+      <div class="addrow"><button type="button" class="btn btn-primary btn-sm" data-act="safe-props">Download the soil properties</button><button type="button" class="btn btn-ghost btn-sm" data-act="safe-cells">Download where each one goes</button></div>
+      <div class="note">Springs are pressure over settlement at the design life (${yrs(life())}). In SAFE: Define, Soil Subgrade Properties for the values; Assign, Support Data, Soil Properties to put each one on its part of the raft, following the map.</div>`;
+  }
+  return `<div class="note">SAFE solves the raft on springs; GeoProMax works out the springs the ground really gives. Pass the results back and forth until they stop changing.<br><b>1.</b> In SAFE, run the analysis and export the <b>Soil Pressures</b> table to Excel. <b>2.</b> Open it here. <b>3.</b> Put the springs below into SAFE and run it again. Repeat.</div>
+    <div class="addrow"><label class="btn btn-ghost btn-sm filebtn">Open SAFE's Excel or CSV file<input type="file" id="safeFile" accept=".xlsx,.csv,.txt,.tsv" hidden></label></div>
+    <textarea class="pts" id="safePaste" rows="3" spellcheck="false" placeholder="or paste the table here from Excel, with its headings" aria-label="Paste the table from SAFE"></textarea>
+    <div class="addrow"><button type="button" class="btn btn-ghost btn-sm" data-act="safe-paste">Read the pasted table</button></div>
+    ${draft}
+    <div class="f wide"><span class="lab">Units<small>for the springs, and for a table that does not say its own</small></span><select data-safe="units" aria-label="Units">${UNIT_SYSTEMS.map(([k, n]) => `<option value="${k}" ${k === s.units ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+    <div class="two">
+      ${num("safe.tol", "Converged under", "%", { min: 0.5, step: 0.5, sub: "mean change" })}
+      ${num("safe.zones", "Soil properties", "", { min: 1, max: 12, step: 1, sub: "bands of springs" })}
+    </div>
+    ${rounds}${out}
+    ${s.rounds.length ? `<div class="addrow"><button type="button" class="btn btn-ghost btn-sm" data-act="safe-reset">Start the rounds again</button></div>` : ""}`;
+}
+function safeRead(name, tables) {
+  const s = state.project.safe;
+  try { state.safeDraft = { name, tables, info: readSafe(tables, { units: s.units, kase: s.kase, step: s.step }) }; }
+  catch (e) { state.safeDraft = { name, tables: null, error: e.message }; }
+  renderInputs();
+}
+function safeRun() {
+  const d = state.safeDraft, p = state.project;
+  if (!d || !d.info) return;
+  const c = toCells(d.info.points, d.info.kind);
+  let i = fieldIndex();
+  const first = i < 0;
+  if (first) { p.loads.push(loadFrom("field")); i = p.loads.length - 1; }
+  p.loads[i].cells = c.cells.map((r) => r.map((v) => +v.toFixed(4)));
+  p.loads[i].size = +c.size.toFixed(4);
+  let r;
+  try { r = safeRound(p, p.loads[i], life(), p.safe.k, { tol: (+p.safe.tol || 5) / 100 }); }
+  catch (e) { toast("The springs could not be worked out: " + e.message, true); return; }
+  p.safe.rounds.push({ ...r.summary, kase: d.info.kase, file: d.name });
+  p.safe.k = r.list.map((x) => [x.x, x.y, x.k === null ? 0 : +x.k.toPrecision(6)]);
+  p.safe.kase = d.info.kase; p.safe.step = d.info.step;
+  state.safeDraft = null;
+  const others = p.loads.filter((l, n) => n !== i && l.on !== false).length;
+  changed(true);
+  state.safeList = r.list;
+  toast(r.summary.converged ? "Converged: SAFE and the ground agree." : first && others ? `Round 1 done. ${others} other load${others === 1 ? " is" : "s are"} still switched on: switch off any that SAFE's raft replaces.` : `Round ${p.safe.rounds.length} done. Put the springs into SAFE and run it again.`);
+}
+function safeDownload(which) {
+  const p = state.project, i = fieldIndex();
+  if (i < 0) return;
+  const list = safeList(), t = exportTables(list, +p.loads[i].size, zonesOf(list, +p.safe.zones || 5), p.safe.units);
+  download(`${safeName()} springs round ${p.safe.rounds.length} ${which === "props" ? "properties" : "cells"}.csv`, which === "props" ? t.props : t.cells, "text/csv");
+}
+
 const gf = (k, label, unit, step) => `<div class="f"><span class="lab">${label}</span><span class="num"><input type="number" inputmode="decimal" data-grid="${k}" value="${state.gridForm[k]}" min="${k === "nx" || k === "ny" ? 1 : 0}" step="${step}" aria-label="${label}"><span class="unit">${unit}</span></span></div>`;
 
 const limitText = (p) => `${fmt(+p.limits.total, 0)} mm${+p.limits.tilt > 0 ? ` · 1/${fmt(+p.limits.tilt, 0)}` : ""}`;
@@ -228,6 +324,7 @@ const GROUPS = [
   { g: "Groundwater", icon: "water", open: false, sum: (p) => `${fmt(+p.waterTable, 2)} m deep`,
     body: () => num("waterTable", "Water table depth", "m", { min: 0, step: 0.25, sub: "below ground; hydrostatic below it" }) },
   { g: "Foundations and loads", icon: "load", open: true, sum: (p) => `${p.loads.filter((l) => l.on !== false).length} on`, body: loadsWidget },
+  { g: "CSI SAFE link", icon: "link", open: false, sum: (p) => { const r = p.safe.rounds; return !r.length ? "not used" : r.at(-1).converged ? `converged, round ${r.length}` : `round ${r.length}`; }, body: safeWidget },
   { g: "Analysis", icon: "calc", open: false, sum: (p) => `${p.method === "westergaard" ? "Westergaard" : "Boussinesq"} · ${fmt(+p.life, 0)} yr`,
     body: (p) => seg("method", "Stress distribution", [["boussinesq", "Boussinesq"], ["westergaard", "Westergaard"]])
       + `<div class="note">${p.method === "westergaard" ? "Westergaard: a soil reinforced by thin stiff layers (varved clays). It spreads the load more, so stresses under the centre are lower." : "Boussinesq: a uniform elastic half-space. The usual choice."}</div>`
@@ -296,6 +393,23 @@ function onInput(ev) {
     const b = $('[data-act="grid-add"]'); if (b) b.textContent = `Add ${state.gridForm.nx * state.gridForm.ny} footings`;
     return;
   }
+  if (el.id === "safeFile") {
+    const f = el.files?.[0];
+    if (!f) return;
+    (async () => {
+      if (/\.xls$/i.test(f.name)) { state.safeDraft = { name: f.name, error: "this is an old .xls workbook. Save it as .xlsx (or CSV) in Excel and open that." }; renderInputs(); return; }
+      try { safeRead(f.name, /\.xlsx$/i.test(f.name) ? await readXlsx(await f.arrayBuffer()) : [{ name: "pasted", rows: parseDelimited(await f.text()) }]); }
+      catch (e) { state.safeDraft = { name: f.name, error: e.message }; renderInputs(); }
+    })();
+    return;
+  }
+  if (el.dataset.safe) {
+    p.safe[el.dataset.safe] = el.value;
+    if (state.safeDraft?.tables) safeRead(state.safeDraft.name, state.safeDraft.tables); else renderInputs();
+    scheduleSave();
+    return;
+  }
+  if (el.id === "safePaste") return;
   if (!el.dataset.k) return;
   let v;
   if (el.type === "checkbox") v = el.checked;
@@ -344,6 +458,10 @@ function onClick(ev) {
     }
     toast(`${pads.length} footings added. Undo takes them back.`);
   }
+  else if (act === "safe-paste") { const t = $("#safePaste").value; if (t.trim()) safeRead("Pasted table", [{ name: "pasted", rows: parseDelimited(t) }]); return; }
+  else if (act === "safe-run") { safeRun(); return; }
+  else if (act === "safe-props" || act === "safe-cells") { safeDownload(act === "safe-props" ? "props" : "cells"); return; }
+  else if (act === "safe-reset") { p.safe.rounds = []; p.safe.k = null; }
   else if (act === "load-open") { state.openLoad = i; renderInputs(); return; }
   else if (act === "load-del") { p.loads.splice(i, 1); state.openLoad = null; }
   else if (act === "load-dup") {
@@ -514,7 +632,7 @@ function analyse() {
     toast("Could not work out the settlement: " + e.message, true);
   }
   state.curve = state.res ? timeCurve(state.res, life()) : null;
-  state.found = null;
+  state.found = null; state.safeList = null;
   syncTimebar();
   renderVerdict(); renderKpis(); renderTabs(); renderPanel();
   askGrid();
@@ -700,6 +818,7 @@ const METHODS = `<div class="explain" style="display:grid;gap:10px;max-width:820
   <p><b>Rate.</b> Terzaghi's one-dimensional theory for each layer: <code>Tv = cv·t / Hdr²</code>, with Hdr half the layer for drainage through both faces and the whole layer for one. With <b>wick drains</b>, water also flows sideways to the drains (Hansbo 1981) and the two add by Carrillo's rule: <code>U = 1 − (1−Uv)(1−Ur)</code>. Loads that go on later (Applied at) are stages: each stage's extra settlement consolidates from its own time.</p>
   <p><b>Creep.</b> Once a layer is 95% consolidated under the last stage (at t95), it keeps settling by <code>Cα·h/(1+ep)·log(t/t95)</code>. Where the soil stays overconsolidated it creeps less, by Cα·Cr/Cc, because Cα/Cc is a constant of the soil (Mesri and Castro 1987).</p>
   <p><b>Convergence.</b> With sub-layers on automatic, each layer is cut finer and finer until the settlement changes by less than 0.5% from one refinement to the next. The Checks tab says how many it took, or warns if it did not get there.</p>
+  <p><b>CSI SAFE link.</b> SAFE solves a raft on springs, and the right springs depend on how the ground settles under the raft's own pressures. So the two are solved in turn: SAFE's soil pressures become the load here (gathered into square cells that keep the total load), the settlement under each cell at the design life gives its spring, <code>k = pressure / settlement</code>, and SAFE runs again on those springs. The rounds stop when the springs change by less than the tolerance on average, and by less than three times it anywhere. Springs are banded into a few soil properties, because SAFE takes one subgrade modulus per property.</p>
   <p><b>Limits.</b> Each kind of structure comes with a usual limit on total settlement and on tilt (angular distortion), after Skempton and MacDonald (1956), Bjerrum (1963), Eurocode 7 Annex H and API 653 for tanks. They are starting points: set your own under Structure and limits. Tilt is checked across each foundation and between neighbouring ones.</p>
   <p class="note">Results are for design and checking by an engineer. One-dimensional strain is assumed; bearing capacity is not checked here. Units: m, kN, kPa, years; settlement in mm.</p>
 </div>`;
@@ -832,7 +951,7 @@ $("#fileOpen").addEventListener("change", async (ev) => {
 });
 
 function startOver() {
-  state.grid = null; state.verify = null; state.openLoad = null;
+  state.grid = null; state.verify = null; state.openLoad = null; state.safeDraft = null;
   $("#projectName").value = state.project.name;
   renderInputs(); analyse(); resetHistory();
 }

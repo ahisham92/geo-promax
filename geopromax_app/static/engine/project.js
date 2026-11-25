@@ -1,7 +1,7 @@
 // A GeoProMax project: the inputs only. Everything shown is worked out again
 // from these, in the browser.
 
-import { parsePoints, equivalentRaft, grossPressure, appliedPressure } from "./stress.js";
+import { parsePoints, equivalentRaft, grossPressure, appliedPressure, loadForce } from "./stress.js";
 import { initialStress } from "./settlement.js";
 
 const CLAY = (name, gamma, gammaSat, E, nu, Cc, Cr, e0, OCR, cv, Ca) => ({ name, gamma, gammaSat, E, nu, consolidating: true, Cc, Cr, e0, OCR, cv, Ca });
@@ -68,7 +68,7 @@ export const LOAD_TYPES = [
   ["embankment", "Embankment or fill", "crest, side slopes and height"],
   ["pilegroup", "Pile group", "piles taken as an equivalent raft at depth"],
 ];
-export const LOAD_NAMES = Object.fromEntries(LOAD_TYPES.map(([k, n]) => [k, n]));
+export const LOAD_NAMES = { ...Object.fromEntries(LOAD_TYPES.map(([k, n]) => [k, n])), field: "Raft from SAFE" };
 
 export function loadFrom(type, at = {}) {
   const base = { on: true, t0: 0, x: 0, y: 0, angle: 0, Df: 0, net: false, rigid: false };
@@ -82,6 +82,7 @@ export function loadFrom(type, at = {}) {
     polygon:    { name: "Area", q: 60, pts: "0, 0\n20, 0\n20, 8\n8, 8\n8, 20\n0, 20" },
     embankment: { name: "Embankment", crest: 12, slope: 6, H: 3, gamma: 20, L: 80, axis: "y" },
     pilegroup:  { name: "Pile group", B: 6, L: 6, Lp: 15, pileType: "friction", Q: 12000, Df: 1.5, rigid: true },
+    field:      { name: "Raft from SAFE", cells: [], size: 1, Df: 1 },
   }[type] || {};
   return { type: T.name ? type : "rect", ...base, ...(T.name ? T : { name: "Raft", B: 10, L: 20, q: 80 }), ...at };
 }
@@ -177,6 +178,8 @@ export const DEFAULTS = {
   section: "x",    // the cross-section runs along x (through the query point's y) or along y
   limits: limitsFor("frame-pads"),
   query: { x: 0, y: 0 },
+  // the loop with CSI SAFE: units of the tables, tolerance (%), number of soil properties, the rounds so far and the last springs
+  safe: { units: "kN-m", tol: 5, zones: 5, kase: null, step: null, rounds: [], k: null },
 };
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -190,6 +193,7 @@ export function complete(p = {}) {
   out.grid = { ...DEFAULTS.grid, ...(p.grid || {}) };
   out.query = { x: 0, y: 0, ...(out.query || {}) };
   out.limits = { ...DEFAULTS.limits, ...(out.limits || {}) };
+  out.safe = { ...clone(DEFAULTS.safe), ...(out.safe || {}) };
   out.layers = (out.layers || []).map((l) => ({ ...LAYER_DEFAULTS, ...l, drains: { ...DRAINS, ...(l.drains || {}) } }));
   out.loads = (out.loads || []).map((l) => ({ ...loadFrom(l.type || "rect"), ...l }));
   if (!out.name) out.name = tpl.name;
@@ -209,6 +213,7 @@ export function describeLoad(l) {
     case "circle": return `radius ${n(l.R)} m`;
     case "ring": return `radius ${n(l.Ri)} to ${n(l.R)} m`;
     case "polygon": return `${parsePoints(l.pts).length} corners`;
+    case "field": return `${(l.cells || []).length} cells of ${n(l.size)} m, ${n(loadForce(l) / 1000, 1)} MN in all`;
     case "embankment": return `crest ${n(l.crest)} m, sides ${n(l.slope)} m, ${n(l.H)} m high, ${n(l.L)} m long along ${l.axis}`;
     case "pilegroup": { const e = equivalentRaft(l); return `${n(l.B)} × ${n(l.L)} m group, ${n(l.Lp, 1)} m ${l.pileType === "end" ? "end-bearing" : "friction"} piles, ${n(l.Q, 0)} kN; equivalent raft ${n(e.B)} × ${n(e.L)} m at ${n(e.zf)} m${turn}`; }
     default: return `${n(l.B)} × ${n(l.L)} m${turn}`;
@@ -250,6 +255,7 @@ export function checks(p) {
     if (l.on === false) return;
     const n = l.name || `Load ${i + 1}`;
     if (l.type === "polygon" && parsePoints(l.pts).length < 3) out.push({ level: "critical", text: `${n}: a shape needs at least three corners, one "x, y" per line.` });
+    if (l.type === "field" && !(l.cells || []).length) out.push({ level: "critical", text: `${n}: no soil pressures have been brought in from SAFE yet.` });
     if (l.type === "ring" && !(+l.Ri < +l.R)) out.push({ level: "critical", text: `${n}: the inner radius must be smaller than the outer radius.` });
     if (["pad", "strip", "rect", "building", "pilegroup"].includes(l.type) && (!(+l.B > 0) || !(+l.L > 0))) out.push({ level: "critical", text: `${n}: the width and length must be more than zero.` });
     if (l.type === "circle" && !(+l.R > 0)) out.push({ level: "critical", text: `${n}: the radius must be more than zero.` });

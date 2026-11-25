@@ -170,3 +170,143 @@ test("bad numbers never become NaN", () => {
   assert.ok(Number.isFinite(s.total));
   for (const f of foundationSummary(p, 10)) assert.ok(Number.isFinite(f.governing), f.name);
 });
+
+// ---------------------------------------------------------------- the SAFE link
+
+import { parseDelimited, readSafe, toCells, springs, round, zonesOf, exportTables, compare } from "../geopromax_app/static/engine/ssi.js";
+import { readXlsx } from "../geopromax_app/static/engine/xlsx.js";
+import { deflateRawSync } from "node:zlib";
+
+// A raft's soil pressures the way SAFE lists them: a title, headings, a units row, one row per joint of every element.
+function safeTable({ nx = 9, ny = 7, dx = 2, dy = 2, p = () => 100, units = ["m", "m", "kN/m²"], scaleL = 1, scaleP = 1, sign = -1 } = {}) {
+  const rows = [["TABLE:  Soil Pressures"], ["Area", "Joint", "OutputCase", "CaseType", "GlobalX", "GlobalY", "Pressure"], ["", "", "", "", units[0], units[1], units[2]]];
+  for (const kase of ["Dead", "Service"]) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const x = i * dx, y = j * dy, v = sign * p(x, y) * (kase === "Dead" ? 0.6 : 1);
+    rows.push(["1", `${j * nx + i + 1}`, kase, "Combination", String(x / scaleL), String(y / scaleL), String(v / scaleP)]);
+    if (i % 2 === 0) rows.push(["2", `${j * nx + i + 1}`, kase, "Combination", String(x / scaleL), String(y / scaleL), String(v / scaleP)]); // shared joints are listed twice
+  }
+  return rows;
+}
+const tsv = (rows) => rows.map((r) => r.join("\t")).join("\n");
+
+test("a SAFE soil pressure table is read, whatever its units and sign", () => {
+  const a = readSafe(tsv(safeTable()), { kase: "Service" });
+  assert.equal(a.kind, "pressure");
+  assert.deepEqual(a.cases, ["Dead", "Service"]);
+  assert.equal(a.points.length, 63);
+  assert.ok(a.points.every((q) => Math.abs(q.p - 100) < 1e-9));
+  assert.equal(readSafe(tsv(safeTable())).points[0].p, 60); // the first case when none is asked for
+  // N and mm: coordinates in mm, pressures in N/mm²
+  const b = readSafe(tsv(safeTable({ units: ["mm", "mm", "N/mm²"], scaleL: 0.001, scaleP: 1000 })), { kase: "Service" });
+  assert.ok(Math.abs(b.points.at(-1).x - 16) < 1e-9 && Math.abs(b.points.at(-1).p - 100) < 1e-9);
+  // no units row: the system chosen on the page is used
+  const plain = safeTable({ scaleL: 0.3048, scaleP: 47.88026 }).filter((_, i) => i !== 2);
+  const c = readSafe(tsv(plain), { kase: "Service", units: "kip-ft" });
+  assert.ok(Math.abs(c.points.at(-1).x - 16) < 1e-6 && Math.abs(c.points.at(-1).p - 100) < 1e-6);
+  assert.throws(() => readSafe("a,b,c\n1,2,3"), /no column of soil pressures/);
+});
+
+test("pressures without coordinates are placed from the joints table", () => {
+  const press = [["Joint", "OutputCase", "Soil Pressure"], ["", "", "kN/m²"], ["1", "S", "-80"], ["2", "S", "-120"]];
+  const joints = [["Joint", "Global X", "Global Y", "Global Z"], ["", "m", "m", "m"], ["1", "0", "0", "0"], ["2", "4", "0", "0"]];
+  const r = readSafe([{ name: "Soil Pressures", rows: press }, { name: "Joint Coordinates", rows: joints }]);
+  assert.deepEqual(r.points, [{ x: 0, y: 0, p: 80 }, { x: 4, y: 0, p: 120 }]);
+});
+
+test("the cells keep the raft's total load, and coarsen for a fine mesh", () => {
+  const pts = readSafe(tsv(safeTable({ nx: 61, ny: 41, dx: 0.5, dy: 0.5 })), { kase: "Service" }).points;
+  const c = toCells(pts, "pressure", 300);
+  assert.ok(c.cells.length <= 300 && c.cells.length > 150);
+  // 100 kPa on a 30 m by 20 m raft: the load is kept to within 2%, and the edge cells carry less
+  assert.ok(Math.abs(c.force - 60000) / 60000 < 0.02, `${c.force}`);
+  assert.ok(Math.abs(c.area - 600) / 600 < 0.02);
+  assert.ok(c.cells.every((x) => Math.abs(x[3] - 100) < 1e-9) && Math.min(...c.cells.map((x) => x[2])) < 80);
+  const coarse = toCells(pts, "pressure", 60);
+  assert.ok(coarse.cells.length <= 60 && Math.abs(coarse.force - 60000) / 60000 < 0.03, `${coarse.force}`);
+});
+
+// A stand-in for SAFE: a perfectly rigid raft on the springs it is given.
+function rigidRaftOnSprings(cells, size, k, Q) {
+  const sum = k.reduce((a, b) => a + b, 0) * size * size, d = Q / sum;
+  return cells.map(([x, y], i) => [x, y, k[i] * d]);
+}
+
+test("soil and structure agree after a few rounds: a rigid raft ends up settling evenly", () => {
+  const p = complete({ template: "blank", waterTable: 2, layers: [layerFrom("fill", 1), layerFrom("firmClay", 10), layerFrom("denseSand", 8)], loads: [] });
+  const load = loadFrom("field", { Df: 1 });
+  const first = toCells(readSafe(tsv(safeTable({ nx: 9, ny: 7 })), { kase: "Service" }).points);
+  load.cells = first.cells; load.size = first.size;
+  p.loads = [load];
+  const Q = first.force;
+  let before = null, history = [];
+  for (let i = 0; i < 12; i++) {
+    const r = round(p, load, p.life, before, { tol: 0.02 });
+    history.push(r.summary);
+    if (r.summary.converged) break;
+    before = r.list.map((s) => [s.x, s.y, s.k]);
+    load.cells = rigidRaftOnSprings(load.cells, load.size, r.list.map((s) => s.k), Q).map((c) => [c[0], c[1], c[2], c[2]]);
+  }
+  const last = history.at(-1);
+  assert.ok(last.converged, `converged in ${history.length} rounds`);
+  assert.ok(history.length <= 10);
+  // uniform pressure dishes; the rigid raft's pressures settle it nearly evenly, with more pressure at the edges
+  assert.ok(history[0].sMax / history[0].sMin > 1.5);
+  assert.ok(last.sMax / last.sMin < 1.1, `${last.sMax / last.sMin}`);
+  const near = (x, y) => load.cells.reduce((a, c) => (Math.hypot(c[0] - x, c[1] - y) < Math.hypot(a[0] - x, a[1] - y) ? c : a));
+  const centre = near(8, 6), corner = near(0, 0);
+  assert.ok(corner[2] > 1.2 * centre[2]);
+  // the load on the raft never changes
+  assert.ok(Math.abs(last.force - Q) / Q < 1e-9);
+});
+
+test("springs are banded into soil properties and written in SAFE's units", () => {
+  const list = [50, 80, 120, 200, 400, null].map((k, i) => ({ x: i, y: 0, p: 100, q: 100, s: k ? 100 / k : 0, k: k && k * 100 }));
+  const z = zonesOf(list, 3);
+  assert.equal(z.zones.length, 3);
+  assert.ok(z.zones.every((b, i) => i === 0 || b.k > z.zones[i - 1].k));
+  assert.equal(z.of[5], 0); // no spring worked out: the softest band, never a hard spot
+  const t = exportTables(list, 2, z, "N-mm");
+  assert.match(t.props, /GPM-K1,0\.00\d+/);   // 5000 to 40000 kN/m³ is 0.005 to 0.04 N/mm³
+  assert.match(t.cells.split("\r\n")[2], /^0,0,2000,0\.1,/);
+  assert.equal(compare(list, list.map((s) => [s.x, s.y, s.k])).max, 0);
+});
+
+test("an Excel workbook is read without any library", async () => {
+  // a minimal .xlsx: stored and deflated parts, shared and inline strings
+  const files = {
+    "xl/workbook.xml": `<workbook xmlns:r="r"><sheets><sheet name="Soil Pressures" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+    "xl/sharedStrings.xml": `<sst><si><t>GlobalX</t></si><si><t>GlobalY</t></si><si><r><t>Pres</t></r><r><t>sure &amp; more</t></r></si></sst>`,
+    "xl/worksheets/sheet1.xml": `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row><row r="2"><c r="A2"><v>1.5</v></c><c r="C2"><v>-90</v></c><c r="D2" t="inlineStr"><is><t>x</t></is></c></row></sheetData></worksheet>`,
+  };
+  const enc = new TextEncoder(), parts = [], central = [];
+  let off = 0;
+  Object.entries(files).forEach(([name, body], i) => {
+    const raw = enc.encode(body), data = i % 2 ? deflateRawSync(raw) : raw, n = enc.encode(name);
+    const local = new Uint8Array(30 + n.length), lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true); lv.setUint16(8, i % 2 ? 8 : 0, true); lv.setUint32(18, data.length, true); lv.setUint32(22, raw.length, true); lv.setUint16(26, n.length, true);
+    local.set(n, 30);
+    const cd = new Uint8Array(46 + n.length), cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(10, i % 2 ? 8 : 0, true); cv.setUint32(20, data.length, true); cv.setUint32(24, raw.length, true); cv.setUint16(28, n.length, true); cv.setUint32(42, off, true);
+    cd.set(n, 46);
+    parts.push(local, data); central.push(cd);
+    off += local.length + data.length;
+  });
+  const cdSize = central.reduce((a, c) => a + c.length, 0), end = new Uint8Array(22), ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, central.length, true); ev.setUint16(10, central.length, true); ev.setUint32(12, cdSize, true); ev.setUint32(16, off, true);
+  const zip = Buffer.concat([...parts, ...central, end]);
+  const sheets = await readXlsx(zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.length));
+  assert.equal(sheets[0].name, "Soil Pressures");
+  assert.deepEqual(sheets[0].rows, [["GlobalX", "GlobalY", "Pressure & more"], ["1.5", "", "-90", "x"]]);
+  await assert.rejects(readXlsx(new Uint8Array(100).buffer), /not an Excel workbook/);
+});
+
+test("a raft from SAFE is a load like any other", () => {
+  const cells = toCells(readSafe(tsv(safeTable())).points);
+  const p = complete({ template: "blank", loads: [{ ...loadFrom("field", { Df: 1 }), cells: cells.cells, size: cells.size }] });
+  assert.equal(checks(p).filter((c) => c.level === "critical").length, 0);
+  const f = foundationSummary(p, p.life)[0];
+  assert.ok(f.governing > 0 && f.diff > 0 && Number.isFinite(f.tilt));
+  assert.ok(checks(complete({ template: "blank", loads: [loadFrom("field")] })).some((c) => /SAFE/.test(c.text)));
+  assert.equal(springs(p, p.loads[0], p.life).length, cells.cells.length);
+});
