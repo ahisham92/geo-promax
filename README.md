@@ -1,6 +1,6 @@
 # GeoProMax: settlement
 
-GeoProMax works out how much the ground settles under foundations, tanks and embankments, and how fast. Describe the soil layers and the water table, place the loads on the plan, and the answer updates while you type, on a desktop or a phone: the settlement at any point and over the whole plan, a cross-section with the stress bulbs and the settled ground, and the settlement with time up to the design life.
+GeoProMax works out how much the ground settles under footings, rafts, buildings, tanks, pile groups and embankments, how fast, and whether that is within the limits for what is being built. Describe the soil layers and the water table, place the loads on the plan, and the answer updates while you type, on a desktop or a phone: the settlement at any point and over the whole plan, a cross-section with the stress bulbs and the settled ground, and the settlement with time up to the design life.
 
 It runs inside the Project_Management site at `/geopromax`. Pull the site and it is there.
 
@@ -8,14 +8,17 @@ It runs inside the Project_Management site at `/geopromax`. Pull the site and it
 
 | | |
 |---|---|
-| **Soil profile** | Any number of layers, each with unit weights above and below the water table, E and ν, and, for clays, silts and organic soils, Cc, Cr, e0, OCR or POP, cv, Cα and drainage through one face or both. Ten typical soils to start a layer from. |
-| **Loads** | Rectangles, circles and embankments (crest, side slopes, height and fill unit weight), anywhere on the plan, each switched on or off and each applied at its own time, so a fill built in stages is a set of loads. |
-| **Stresses** | Boussinesq or Westergaard. Rectangles are solved exactly by the corner method (Newmark 1935), so a point beside a load is as exact as one under it; circles are split into 40 strips of equal area and embankment slopes into 20 steps. |
+| **Soil profile** | Any number of layers, each with unit weights above and below the water table, E (which can grow with depth) and ν, and, for clays, silts and organic soils, Cc, Cr, e0, OCR or POP (or mv from oedometer tests), cv, Cα and drainage through one face or both. 24 typical soils to start a layer from: clays and peat, silts and loess, sands and gravels, fills, residual soil and rocks. |
+| **Foundations and loads** | Pad footings (column load), strip footings (wall load per metre), rafts, buildings (storeys times a load per storey), circular tanks, ring foundations, any polygon, embankments and pile groups. Each has a founding depth, can be turned on the plan, be rigid or flexible, use gross or net pressure, and go on at its own time. A form lays out a whole grid of column footings in one go. |
+| **Pile groups** | Tomlinson's equivalent raft: at two thirds of the pile length with a 1 in 4 spread for friction piles, at the toes for end-bearing piles. |
+| **Stresses** | Boussinesq or Westergaard, from each foundation's founding level. Rectangles are solved exactly by the corner method (Newmark 1935); circles, rings, polygons, turned footings and embankment slopes are split into strips of equal area. |
 | **Immediate settlement** | Δσ·h / M in every sub-layer, with the constrained modulus M = E(1−ν)/((1+ν)(1−2ν)). |
-| **Primary consolidation** | Cc and Cr about σ'p = OCR·σ'v0 + POP, sub-layer by sub-layer. |
-| **Rate** | Terzaghi's one-dimensional theory per layer. Each stage's extra settlement consolidates from the time it goes on. |
-| **Creep** | Cα/(1+ep)·h·log(t/t95), once a layer is 95% consolidated. |
-| **Plan** | Total settlement over a grid at any time, with contours, the largest settlement and the steepest tilt (checked against 1/500 and 1/300). Play it through time with the time bar. |
+| **Primary consolidation** | Cc and Cr about σ'p = OCR·σ'v0 + POP, or mv·Δσ·h, sub-layer by sub-layer. Unloading (an excavation heavier than the building) heaves along Cr. |
+| **Rate** | Terzaghi's one-dimensional theory per layer, with wick drains by Hansbo (1981) and Carrillo's rule. Each stage's extra settlement consolidates from the time it goes on. |
+| **Creep** | Cα/(1+ep)·h·log(t/t95), once a layer is 95% consolidated; Cα·Cr/Cc where the soil stays overconsolidated (Mesri and Castro 1987). |
+| **Convergence** | Sub-layers are refined automatically until the settlement changes by less than 0.5%, and the Checks tab says so. Inputs that cannot be solved, or that put the answer in doubt, are flagged. |
+| **Limits** | Pick what is being built (framed building on pads or a raft, masonry, steel shed, tall building, tank, silo, bridge, machine, crane, embankment) and the usual limits on settlement and tilt are set; type your own over them. Every foundation is checked on its own and against its neighbours, and the headline says whether the design is within the limits at the design life. |
+| **Plan and section** | Total settlement over a grid at any time, with contours; a cross-section with the foundations at their depths, the piles, the stress bulbs and the settled ground. Play it through time with the time bar. |
 | **Report** | A printable report (save it as PDF), the results table as CSV, and the project as a JSON file. |
 
 All calculations run in the browser (`geopromax_app/static/engine`, plain ES modules with no build step). The plan grid and the section are worked out in a Web Worker, so the page never freezes. The same engine files are tested in Node. The Flask server only serves the page and keeps each person's projects, with version history (Projects, History). Undo and redo work across every input (Ctrl+Z, Ctrl+Shift+Z).
@@ -37,6 +40,14 @@ The **Verification** tab runs these checks in the browser, and CI runs the same 
 | Elastic layer under a wide load | Δσ·H / M | exact |
 | Secondary compression | Cα·H/(1+ep) per log cycle | within 0.2 mm |
 | Two load stages | One load of their sum | exact |
+| Turned footing, ring, L-shaped polygon | The same shapes built from exact rectangles and circles | within 1% |
+| Founding depth, net pressure, pad and strip loads | Hand calculation | exact |
+| Pile group | Tomlinson's equivalent raft by hand | exact |
+| mv consolidation, E growing with depth | Hand calculation | within 0.1 mm |
+| Heave under an excavation | Cr·log(σ'f/σ'v0) | within 0.1 mm |
+| Wick drains | Hansbo (1981) with Carrillo's rule | within 0.5% |
+| Automatic refinement | The same layer cut into 400 sub-layers | within 1% |
+| Rigid square footing | 0.80 of the flexible centre settlement (Bowles) | within 0.05 |
 
 ## Run it alone
 
@@ -59,4 +70,4 @@ Project_Management keeps a copy of `geopromax_app/` and mounts it at `/geopromax
 
 To update the site, copy `geopromax_app/` across and commit it there.
 
-GeoProMax gives results for design and checking by an engineer. Loads are taken as flexible: a stiff raft settles more evenly than the plan shows.
+GeoProMax gives results for design and checking by an engineer. Strain is taken as one-dimensional, and bearing capacity is not checked.
