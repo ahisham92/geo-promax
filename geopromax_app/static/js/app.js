@@ -452,7 +452,8 @@ function renderKpis() {
     [`Immediate`, `${mm(r.immediate)} mm`, `elastic, as the loads go on`],
     [`Primary consolidation`, `${mm(r.primary)} mm`, r.primary > 0 ? `90% done ${t90 > 0 ? `after ${yrs(t90 + (r.stages.at(-1)?.t || 0))}` : "straight away"}` : "no consolidating layer under load"],
     [`Creep`, `${mm(fin.secondary)} mm`, `secondary compression by ${yrs(life())}`],
-    [`Largest on the plan`, g ? `${mm(g.max)} mm` : "…", g ? `steepest tilt ${g.tilt > 0 ? `1/${fmt(1 / g.tilt, 0)}` : "none"} ${tiltBadge(g.tilt)}` : "working it out"],
+    // the query point may fall between grid points, so it counts too
+    [`Largest on the plan`, g ? `${mm(Math.max(g.max, now.total))} mm` : "…", g ? `steepest tilt ${g.tilt > 0 ? `1/${fmt(1 / g.tilt, 0)}` : "none"} ${tiltBadge(g.tilt)}` : "working it out"],
   ].map(([k, v, s, cls]) => `<div class="kpi ${cls || ""}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
 }
 
