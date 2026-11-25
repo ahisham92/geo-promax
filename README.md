@@ -17,6 +17,7 @@ It runs inside the Project_Management site at `/geopromax`. Pull the site and it
 | **Rate** | Terzaghi's one-dimensional theory per layer, with wick drains by Hansbo (1981) and Carrillo's rule. Each stage's extra settlement consolidates from the time it goes on. |
 | **Creep** | Cα/(1+ep)·h·log(t/t95), once a layer is 95% consolidated; Cα·Cr/Cc where the soil stays overconsolidated (Mesri and Castro 1987). |
 | **Bearing capacity** | Every foundation is checked against the ground failing under it: the general bearing capacity equation drained (c', φ') and undrained (su) for clays, with shape and depth factors, the water table, and weaker layers within one width below the base (load spread at 2 to 1). The safety factor is judged against 3 for structures and 1.5 for embankments, or your own. |
+| **Pile capacity** | Shaft friction and end bearing of each pile through the layers (α·su and 9·su in clay; K·σ'v·tanδ and Nq·σ'v in sand, with the API RP 2A limits), for bored or driven piles; the group as the sum of its piles or as one block in clay; a safety factor against the load on the group. |
 | **Convergence** | Sub-layers are refined automatically until the settlement changes by less than 0.5%, and the Checks tab says so. Inputs that cannot be solved, or that put the answer in doubt, are flagged. |
 | **Limits** | Pick what is being built (framed building on pads or a raft, masonry, steel shed, tall building, tank, silo, bridge, machine, crane, embankment) and the usual limits on settlement and tilt are set; type your own over them. Every foundation is checked on its own and against its neighbours, and the headline says whether the design is within the limits at the design life. |
 | **CSI SAFE link** | Soil and structure solved in turn. Open the Soil Pressures table SAFE exports (the Excel file itself, a CSV, or pasted cells; SAFE 20 and later; any unit system, read from the table's own units row). GeoProMax turns the pressures into the load on the ground, works out the subgrade modulus under every part of the raft (pressure over settlement), bands them into a few soil properties and writes them out for SAFE in the units you choose. Run SAFE again, bring the new pressures in, and the panel shows how far the springs moved each round until they converge. |
@@ -51,6 +52,7 @@ The **Verification** tab runs these checks in the browser, and CI runs the same 
 | Automatic refinement | The same layer cut into 400 sub-layers | within 1% |
 | SAFE loop against a rigid raft on springs | Converges in a few rounds to even settlement, with the load kept | within 10% evenness, load exact |
 | Bearing factors at φ = 30°, strip on clay, square footing on sand | Nq 18.40, Nc 30.14, Nγ 22.40 (Vesic); 5.14·su; hand calculation | within 0.5% |
+| One pile in clay and in sand, a group as a block | α·su and 9·su; K·σ'v·tanδ and Nq·σ'v by hand | within 0.5% |
 | Rigid square footing | 0.80 of the flexible centre settlement (Bowles) | within 0.05 |
 
 ## Run it alone
@@ -74,4 +76,4 @@ Project_Management keeps a copy of `geopromax_app/` and mounts it at `/geopromax
 
 To update the site, copy `geopromax_app/` across and commit it there.
 
-GeoProMax gives results for design and checking by an engineer. Strain is taken as one-dimensional, loads as vertical and central, and the capacity of piles is not checked.
+GeoProMax gives results for design and checking by an engineer. Strain is taken as one-dimensional and loads as vertical and central. Lateral load on piles and negative skin friction are not checked.

@@ -173,7 +173,7 @@ test("bad numbers never become NaN", () => {
 
 // ---------------------------------------------------------------- the SAFE link
 
-import { parseDelimited, readSafe, toCells, springs, round, zonesOf, exportTables, compare } from "../geopromax_app/static/engine/ssi.js";
+import { parseDelimited, readSafe, toCells, springs, round, zonesOf, exportTables, springsFile, compare } from "../geopromax_app/static/engine/ssi.js";
 import { readXlsx } from "../geopromax_app/static/engine/xlsx.js";
 import { deflateRawSync } from "node:zlib";
 
@@ -269,6 +269,13 @@ test("springs are banded into soil properties and written in SAFE's units", () =
   assert.match(t.props, /GPM-K1,0\.00\d+/);   // 5000 to 40000 kN/m³ is 0.005 to 0.04 N/mm³
   assert.match(t.cells.split("\r\n")[2], /^0,0,2000,0\.1,/);
   assert.equal(compare(list, list.map((s) => [s.x, s.y, s.k])).max, 0);
+  const file = springsFile(list, 2, z, { project: "P", round: 2, converged: true, time: 50 });
+  assert.equal(file.format, "geopromax-springs");
+  assert.equal(file.units.modulus, "kN/m3");
+  assert.equal(file.cells.length, 6);
+  assert.equal(file.cells[0].zone, "GPM-K1");
+  assert.equal(file.cells[5].modulus, null);
+  assert.ok(file.zones.every((b) => b.modulus > 0));
 });
 
 test("an Excel workbook is read without any library", async () => {
@@ -337,7 +344,7 @@ test("bearing: every kind of foundation gets an answer or a reason, and old proj
   for (const [type] of LOAD_TYPES) {
     const l = loadFrom(type);
     const b = bearingCheck(complete({ template: "blank", layers: [layerFrom("firmClay", 40)], loads: [l] }), l);
-    if (type === "pilegroup") assert.match(b.why, /pile/);
+    if (type === "pilegroup") assert.ok(b.checked && b.pile.one.total > 0, type);
     else assert.ok(b.checked && b.fos > 0 && Number.isFinite(b.qult), type);
   }
   // a compensated raft has no net load
@@ -350,7 +357,7 @@ test("bearing: every kind of foundation gets an answer or a reason, and old proj
   // every starting example is safe in bearing
   for (const key of Object.keys(TEMPLATES)) {
     const p = complete({ template: key });
-    for (const b of bearingAll(p)) if (b && b.checked) assert.ok(b.fos >= p.limits.fos, `${key}: ${b.fos}`);
+    for (const b of bearingAll(p)) if (b && b.checked) assert.ok(b.fos >= (b.pile ? p.limits.fosPile : p.limits.fos), `${key}: ${b.fos}`);
   }
 });
 
@@ -370,4 +377,32 @@ test("bearing: a second stage of fill is checked on top of the first, with the s
   assert.ok(mk(0.05, true)[1].fos < two.fos);
   assert.ok(mk(1, false)[1].fos < two.fos);
   assert.ok(two.fos < one.fos * 1.2);
+});
+
+// ---------------------------------------------------------------- piles
+
+import { pileCapacity, pileCheck } from "../geopromax_app/static/engine/bearing.js";
+
+test("piles: longer, wider and more piles carry more; driven beats bored in sand; a tight group in clay fails as a block", () => {
+  const p = complete({ template: "blank", waterTable: 1, layers: [layerFrom("softClay", 8), layerFrom("stiffClay", 12), layerFrom("denseSand", 15)], loads: [] });
+  const one = (L, d, how = "bored") => pileCapacity(p, 1, L, d, how).total;
+  assert.ok(one(18, 0.6) > one(12, 0.6) && one(18, 0.9) > one(18, 0.6));
+  assert.ok(one(22, 0.6, "driven") > one(22, 0.6, "bored"), "the toe is in sand");
+  assert.equal(pileCapacity(p, 1, 22, 0.6).toeLayer, "Dense sand and gravel");
+  assert.equal(pileCapacity(p, 1, 19, 0.6).toeLayer, "Dense sand and gravel", "a toe on a boundary bears on the layer below");
+  assert.ok(pileCapacity(p, 1, 60, 0.6).beyond);
+  const group = (o) => pileCheck(p, loadFrom("pilegroup", { Lp: 15, Df: 1, B: 6, L: 6, Q: 8000, nPiles: 9, pileD: 0.6, ...o }));
+  const g = group({});
+  assert.equal(g.mode, "the piles one by one");
+  assert.ok(Math.abs(g.fos - (9 * g.pile.one.total) / 8000) < 1e-9);
+  assert.ok(group({ nPiles: 16 }).fos > g.fos);
+  // 100 piles crammed into a 2 m square: the block governs
+  const tight = group({ nPiles: 100, B: 2, L: 2 });
+  assert.equal(tight.mode, "the group as one block");
+  assert.ok(tight.fos < (100 * tight.pile.one.total) / 8000);
+  assert.match(group({ pileD: 0 }).why, /diameter/);
+  assert.match(group({ Lp: 80 }).why, /below the bottom/);
+  // the pile template is safe against its own limit
+  const t = complete({ template: "piles" }), b = bearingAll(t)[0];
+  assert.ok(b.pile && b.fos >= t.limits.fosPile, `${b.fos}`);
 });
