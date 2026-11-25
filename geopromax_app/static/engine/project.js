@@ -40,6 +40,16 @@ export const PRESETS = {
   chalk:      GRAN("Chalk",                      19, 20,   100000, 0.25),
   soundRock:  GRAN("Sound rock",                 25, 25.5, 5000000, 0.20),
 };
+// Strength for the bearing check: friction angle φ' (degrees), cohesion c' (kPa) and, for clays and silts, undrained strength su (kPa).
+const STRENGTH = {
+  peat: [25, 0, 10], organic: [24, 0, 15], marineClay: [23, 0, 12], softClay: [25, 0, 20], firmClay: [26, 2, 50], stiffClay: [27, 5, 100], hardClay: [30, 10, 200],
+  softSilt: [28, 0, 25], silt: [30, 0, 50], loess: [30, 5, 0],
+  looseSand: [30, 0, 0], siltySand: [31, 0, 0], clayeySand: [30, 2, 0], sand: [34, 0, 0], denseSand: [38, 0, 0], gravel: [40, 0, 0],
+  fill: [33, 0, 0], looseFill: [28, 0, 0], rockfill: [42, 0, 0], residual: [30, 5, 0],
+  rock: [38, 100, 0], mudstone: [30, 150, 0], chalk: [33, 50, 0], soundRock: [45, 1000, 0],
+};
+for (const [k, [phi, c, su]] of Object.entries(STRENGTH)) Object.assign(PRESETS[k], { phi, c, su });
+
 export const PRESET_GROUPS = [
   ["Clays and organic soils", ["peat", "organic", "marineClay", "softClay", "firmClay", "stiffClay", "hardClay"]],
   ["Silts", ["softSilt", "silt", "loess"]],
@@ -50,7 +60,7 @@ export const PRESET_GROUPS = [
 export const PRESET_KEYS = Object.keys(PRESETS);
 
 const DRAINS = { on: false, spacing: 1.5, pattern: "tri", dw: 0.066, ch: 3 };
-const LAYER_DEFAULTS = { Einc: 0, model: "cc", mv: 0.3, Cc: 0.3, Cr: 0.05, e0: 1.0, OCR: 1, POP: 0, cv: 2, Ca: 0.01, drainage: "double" };
+const LAYER_DEFAULTS = { phi: 0, c: 0, su: 0, Einc: 0, model: "cc", mv: 0.3, Cc: 0.3, Cr: 0.05, e0: 1.0, OCR: 1, POP: 0, cv: 2, Ca: 0.01, drainage: "double" };
 
 export function layerFrom(key, thickness = 3) {
   const p = PRESETS[key] || PRESETS.sand;
@@ -120,8 +130,9 @@ export const STRUCTURES = [
   ["embankment", "Embankment, road or yard", 300, 0, "judged on the settlement left after construction; tilt is not checked"],
   ["custom", "My own limits", 50, 500, ""],
 ];
+export const bearingLimit = (key) => (key === "embankment" ? 1.5 : 3);
 export const structureOf = (key) => STRUCTURES.find((s) => s[0] === key) || STRUCTURES[0];
-const limitsFor = (key) => { const s = structureOf(key); return { preset: s[0], total: s[2], tilt: s[3] }; };
+const limitsFor = (key) => { const s = structureOf(key); return { preset: s[0], total: s[2], tilt: s[3], fos: bearingLimit(s[0]) }; };
 
 /** Starting points for a new project. */
 export const TEMPLATES = {
@@ -157,7 +168,7 @@ export const TEMPLATES = {
   },
   drains: {
     // a preload on very soft clay: the settlement is wanted, and wanted quickly
-    name: "Staged embankment with wick drains", waterTable: 0.5, limits: { preset: "custom", total: 2000, tilt: 0 }, life: 30, t: 2,
+    name: "Staged embankment with wick drains", waterTable: 0.5, limits: { preset: "custom", total: 2000, tilt: 0, fos: 1.3 }, life: 30, t: 2,
     layers: [layerFrom("fill", 1), { ...layerFrom("marineClay", 10), drains: { ...DRAINS, on: true, spacing: 1.5 } }, layerFrom("denseSand", 5)],
     loads: [loadFrom("embankment", { name: "Stage 1", H: 2, crest: 20, slope: 4, L: 120 }), loadFrom("embankment", { name: "Stage 2", H: 2, crest: 12, slope: 4, L: 120, t0: 0.5 })],
   },
@@ -193,8 +204,11 @@ export function complete(p = {}) {
   out.grid = { ...DEFAULTS.grid, ...(p.grid || {}) };
   out.query = { x: 0, y: 0, ...(out.query || {}) };
   out.limits = { ...DEFAULTS.limits, ...(out.limits || {}) };
+  if (p.limits && p.limits.fos === undefined) out.limits.fos = bearingLimit(out.limits.preset);
   out.safe = { ...clone(DEFAULTS.safe), ...(out.safe || {}) };
-  out.layers = (out.layers || []).map((l) => ({ ...LAYER_DEFAULTS, ...l, drains: { ...DRAINS, ...(l.drains || {}) } }));
+  // a layer saved before strengths existed takes them from the typical soil it started from
+  const strength = (l) => (l.phi === undefined && l.su === undefined && STRENGTH[l.preset] ? { phi: STRENGTH[l.preset][0], c: STRENGTH[l.preset][1], su: STRENGTH[l.preset][2] } : {});
+  out.layers = (out.layers || []).map((l) => ({ ...LAYER_DEFAULTS, ...strength(l), ...l, drains: { ...DRAINS, ...(l.drains || {}) } }));
   out.loads = (out.loads || []).map((l) => ({ ...loadFrom(l.type || "rect"), ...l }));
   if (!out.name) out.name = tpl.name;
   return out;
@@ -265,9 +279,9 @@ export function checks(p) {
     } else if (+l.Df >= D && D > 0 && l.type !== "embankment") out.push({ level: "critical", text: `${n}: it is founded below the bottom of the soil profile.` });
     const q = grossPressure(l), qa = appliedPressure(l, ob);
     if (l.net && qa < 0) out.push({ level: "warning", text: `${n}: it weighs less than the soil dug out for it (${+q.toFixed(0)} kPa against ${+(q - qa).toFixed(0)} kPa), so the ground heaves.` });
-    if (q > 1000 && l.type !== "pilegroup") out.push({ level: "warning", text: `${n}: ${+q.toFixed(0)} kPa is a very high bearing pressure. Check the bearing capacity before the settlement.` });
+    if (q > 1000 && l.type !== "pilegroup") out.push({ level: "warning", text: `${n}: ${+q.toFixed(0)} kPa is a very high bearing pressure. Look at the bearing safety first.` });
   });
-  if (!(+p.limits.total > 0) || !(+p.limits.tilt > 0)) out.push({ level: "warning", text: "Set a settlement limit and a tilt limit to judge the result against." });
+  if (!(+p.limits.total > 0)) out.push({ level: "warning", text: "Set a settlement limit to judge the result against." });
   return out;
 }
 

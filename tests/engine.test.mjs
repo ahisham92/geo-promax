@@ -310,3 +310,64 @@ test("a raft from SAFE is a load like any other", () => {
   assert.ok(checks(complete({ template: "blank", loads: [loadFrom("field")] })).some((c) => /SAFE/.test(c.text)));
   assert.equal(springs(p, p.loads[0], p.life).length, cells.cells.length);
 });
+
+// ---------------------------------------------------------------- bearing capacity
+
+import { bearingCheck, bearingAll, netUltimate } from "../geopromax_app/static/engine/bearing.js";
+
+test("bearing: water, depth and a soft layer below all count, and clays take the lower of drained and undrained", () => {
+  const sand = (o = {}) => ({ ...layerFrom("sand", 20), ...o });
+  const pad = (o = {}) => loadFrom("pad", { B: 2, L: 2, P: 1200, Df: 1, ...o });
+  const fos = (layers, load, waterTable = 50) => bearingCheck(complete({ template: "blank", waterTable, layers, loads: [load] }), load).fos;
+  const dry = fos([sand()], pad());
+  assert.ok(fos([sand()], pad(), 0) < 0.7 * dry, "water at the surface roughly halves the capacity of sand");
+  assert.ok(fos([sand()], pad({ Df: 2 })) > dry, "deeper is safer");
+  assert.ok(fos([sand()], pad({ B: 3, L: 3 })) > dry, "wider is safer");
+  const soft = bearingCheck(complete({ template: "blank", waterTable: 50, layers: [layerFrom("sand", 2), layerFrom("softClay", 6)], loads: [pad()] }), pad());
+  assert.equal(soft.layer, "Soft clay");
+  assert.equal(soft.mode, "undrained");
+  assert.ok(soft.fos < 0.3 * dry && Math.abs(soft.level - 2) < 1e-9);
+  // a clay with su and φ': whichever is lower
+  assert.equal(netUltimate({ su: 20, phi: 25, c: 0 }, 2, 2, 1, 18, 8).mode, "undrained");
+  assert.equal(netUltimate({ su: 500, phi: 25, c: 0 }, 2, 2, 1, 18, 8).mode, "drained");
+  assert.equal(netUltimate({}, 2, 2, 1, 18, 8), null);
+});
+
+test("bearing: every kind of foundation gets an answer or a reason, and old projects get strengths", () => {
+  for (const [type] of LOAD_TYPES) {
+    const l = loadFrom(type);
+    const b = bearingCheck(complete({ template: "blank", layers: [layerFrom("firmClay", 40)], loads: [l] }), l);
+    if (type === "pilegroup") assert.match(b.why, /pile/);
+    else assert.ok(b.checked && b.fos > 0 && Number.isFinite(b.qult), type);
+  }
+  // a compensated raft has no net load
+  const raft = loadFrom("building", { storeys: 2, Df: 4, extra: 0 });
+  assert.equal(bearingCheck(complete({ template: "blank", loads: [raft] }), raft).fos, Infinity);
+  // a project saved before strengths existed
+  const old = complete({ layers: [{ name: "Clay", preset: "softClay", thickness: 5, gamma: 16, gammaSat: 17, E: 3000, nu: 0.35, consolidating: true }], loads: [loadFrom("rect")], limits: { preset: "embankment", total: 300, tilt: 0 } });
+  assert.equal(old.layers[0].su, 20);
+  assert.equal(old.limits.fos, 1.5);
+  // every starting example is safe in bearing
+  for (const key of Object.keys(TEMPLATES)) {
+    const p = complete({ template: key });
+    for (const b of bearingAll(p)) if (b && b.checked) assert.ok(b.fos >= p.limits.fos, `${key}: ${b.fos}`);
+  }
+});
+
+test("bearing: a second stage of fill is checked on top of the first, with the strength the clay has gained", () => {
+  const mk = (t0, drains) => {
+    const clay = { ...layerFrom("softClay", 8), drains: { ...layerFrom("softClay").drains, on: drains, spacing: 1.5 } };
+    const p = complete({ template: "blank", waterTable: 0.5, layers: [clay, layerFrom("denseSand", 5)],
+      loads: [loadFrom("embankment", { name: "Stage 1", H: 2 }), loadFrom("embankment", { name: "Stage 2", H: 1.5, crest: 8, t0 })] });
+    return bearingAll(p);
+  };
+  const [one, two] = mk(1, true);
+  assert.equal(one.stacked, 0);
+  assert.equal(two.stacked, 1);
+  assert.ok(Math.abs(two.qnet - (2 + 1.5) * 20) < 1e-9 || two.qnet < 70, "both stages are on the ground");
+  assert.ok(two.gain > 0.22 * 0.8 * 40 && two.gain <= 0.22 * 40 + 1e-9);
+  // sooner, or without drains, the clay has gained less and the stage is less safe
+  assert.ok(mk(0.05, true)[1].fos < two.fos);
+  assert.ok(mk(1, false)[1].fos < two.fos);
+  assert.ok(two.fos < one.fos * 1.2);
+});
